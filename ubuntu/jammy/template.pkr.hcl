@@ -9,7 +9,7 @@ packer {
 
 variable "vm_name" {
   type    = string
-  default = "ubuntu-base-live-iso"
+  default = "ubuntu-jammy-live"
 }
 
 variable "cpus" {
@@ -37,16 +37,15 @@ variable "output_directory" {
   default = "output-virtualbox"
 }
 
-variable "shared_folder_host_path" {
+variable "iso_output_directory" {
   type    = string
-  default = "shared"
+  default = "C:\\SharedFolder"
 }
 
 locals {
   iso_url      = "https://releases.ubuntu.com/jammy/ubuntu-22.04.5-live-server-amd64.iso"
   iso_checksum = "sha256:9bc6028870aef3f74f4e16b900008179e78b130e6b0b9a140635434a46aa98b0"
   
-  # Base autoinstall configuration embedded as heredoc
   user_data = <<EOF
 #cloud-config
 autoinstall:
@@ -63,7 +62,6 @@ autoinstall:
   identity:
     hostname: ubuntu-server
     username: ubuntu
-    # Password is 'ubuntu'
     password: "$6$rounds=4096$NFl9k7AwRX6UhF62$GV9a05.ytTkapUGvMwGsKFkxdbk3vO3nEd4cWsyPxNjjYFdTGHORdYYLmEYIJLPB7zI0rldfC4IiKvI/TLnDX."
   ssh:
     install-server: true
@@ -72,30 +70,14 @@ autoinstall:
     layout:
       name: direct
   packages:
-    - openssh-server
-    - sudo
-    - curl
-    - wget
-    - vim
-    - net-tools
-    - openssh-server
-    # Tools needed for live ISO creation
     - squashfs-tools
     - xorriso
-    - isolinux
-    - syslinux-common
-    - debootstrap
-    - genisoimage
-    - p7zip-full
+    - live-boot
+    - live-config
   user-data:
     disable_root: false
   late-commands:
     - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
-    - chmod 440 /target/etc/sudoers.d/ubuntu
-    - "sed -i 's/^#*\\(PermitRootLogin\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
-    - "sed -i 's/^#*\\(PasswordAuthentication\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
-    # Enable SSH server
-    - "systemctl enable ssh.service"
 EOF
 }
 
@@ -114,10 +96,6 @@ source "virtualbox-iso" "ubuntu" {
   ssh_username     = "ubuntu"
   ssh_password     = "ubuntu"
   ssh_timeout      = "30m"
-  ssh_host_port_min = 2222
-  ssh_host_port_max = 2222
-  host_port_min    = 2222
-  host_port_max    = 2222
   
   shutdown_command = "echo 'ubuntu' | sudo -S shutdown -P now"
   
@@ -136,7 +114,7 @@ source "virtualbox-iso" "ubuntu" {
     ["modifyvm", "{{.Name}}", "--boot1", "dvd"],
     ["modifyvm", "{{.Name}}", "--boot2", "disk"],
     ["modifyvm", "{{.Name}}", "--nat-localhostreachable1", "on"],
-    ["sharedfolder", "add", "{{.Name}}", "--name", "shared", "--hostpath", "${var.shared_folder_host_path}"],
+    ["sharedfolder", "add", "{{.Name}}", "--name", "shared", "--hostpath", "${var.iso_output_directory}", "--automount"],
     ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"]
   ]
   
@@ -154,79 +132,80 @@ build {
       "echo 'ubuntu' | sudo -S apt-get update",
       "echo 'ubuntu' | sudo -S apt-get upgrade -y",
       
-      # Ensure SSH server is installed and running
-      "echo 'ubuntu' | sudo -S apt-get install -y openssh-server",
-      "echo 'ubuntu' | sudo -S systemctl enable ssh",
-      "echo 'ubuntu' | sudo -S systemctl start ssh",
+      # Install live ISO creation tools
+      "echo 'ubuntu' | sudo -S apt-get install -y squashfs-tools xorriso live-boot live-config",
       
-      # Install tools for live ISO creation
-      "echo 'ubuntu' | sudo -S apt-get install -y squashfs-tools xorriso isolinux syslinux-common debootstrap genisoimage p7zip-full",
-      
-      # Mount the shared folder for ISO creation
+      # Mount shared folder
       "sudo mkdir -p /mnt/shared",
       "sudo mount -t vboxsf shared /mnt/shared",
       
-      # Create a basic script for live ISO creation
+      # Create live ISO creation script
       "cat << 'EOT' | sudo tee /home/ubuntu/create-live-iso.sh",
       "#!/bin/bash",
       "set -e",
       "",
-      "# Destination for the live ISO",
-      "LIVE_ISO_DIR='/mnt/shared/ubuntu-live-iso'",
-      "ISO_NAME='ubuntu-custom-live.iso'",
+      "# Live ISO creation directories",
+      "LIVE_DIR='/home/ubuntu/live-iso'",
+      "MOUNT_DIR=\"$LIVE_DIR/mnt\"",
+      "SQUASHFS_DIR=\"$LIVE_DIR/squashfs\"",
+      "ISO_DIR=\"$LIVE_DIR/iso\"",
+      "OUTPUT_DIR='/mnt/shared'",
       "",
-      "# Create working directories",
-      "mkdir -p $LIVE_ISO_DIR/extract",
-      "mkdir -p $LIVE_ISO_DIR/custom",
-      "mkdir -p $LIVE_ISO_DIR/new-iso",
+      "# Create necessary directories",
+      "mkdir -p \"$MOUNT_DIR\" \"$SQUASHFS_DIR\" \"$ISO_DIR\"",
       "",
-      "# Mount the original ISO",
-      "sudo mount -o loop /path/to/original/ubuntu-22.04.5-live-server-amd64.iso $LIVE_ISO_DIR/extract",
+      "# Create live filesystem",
+      "sudo mksquashfs / \"$SQUASHFS_DIR/filesystem.squashfs\" -e boot -e proc -e sys -e dev -e mnt -e tmp",
       "",
-      "# Copy ISO contents",
-      "rsync -av $LIVE_ISO_DIR/extract/ $LIVE_ISO_DIR/custom/",
+      "# Prepare ISO structure",
+      "cp /boot/vmlinuz* \"$ISO_DIR/vmlinuz\"",
+      "cp /boot/initrd.img* \"$ISO_DIR/initrd\"",
       "",
-      "# Optional: Customize the live ISO here",
-      "# For example, add custom packages, scripts, etc.",
+      "# Create ISO configuration",
+      "cat << 'ISOLINUX' > \"$ISO_DIR/isolinux.cfg\"",
+      "UI vesamenu.c32",
+      "PROMPT 0",
+      "TIMEOUT 50",
+      "ONTIMEOUT live",
       "",
-      "# Rebuild the ISO",
-      "cd $LIVE_ISO_DIR/custom",
-      "xorriso -as mkisofs -r -o $LIVE_ISO_DIR/$ISO_NAME -b isolinux/isolinux.bin -c isolinux/boot.cat \\",
-      "  -no-emul-boot -boot-load-size 4 -boot-info-table \\",
+      "LABEL live",
+      "  MENU LABEL ^Live System",
+      "  KERNEL /vmlinuz",
+      "  APPEND initrd=/initrd boot=live quiet splash",
+      "",
+      "LABEL live-failsafe",
+      "  MENU LABEL ^Live System (Failsafe)",
+      "  KERNEL /vmlinuz",
+      "  APPEND initrd=/initrd boot=live quiet splash acpi=off noapic noreplace-paravirt",
+      "ISOLINUX",
+      "",
+      "# Create ISO",
+      "cd \"$LIVE_DIR\"",
+      "xorriso -as mkisofs -r -J -joliet-long -l -cache-inodes \\",
       "  -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \\",
-      "  -eltorito-boot isolinux/isolinux.bin \\",
-      "  -eltorito-catalog isolinux/boot.cat \\",
-      "  -no-emul-boot -boot-load-size 4 -boot-info-table \\",
-      "  -joliet -z -l .",
+      "  -partition_offset 16 \\",
+      "  -A 'Ubuntu Live' \\",
+      "  -p 'Packer Generated Live ISO' \\",
+      "  -publisher 'Your Organization' \\",
+      "  -V 'Ubuntu Live' \\",
+      "  -b isolinux/isolinux.bin \\",
+      "  -c isolinux/boot.cat \\",
+      "  -no-emul-boot \\",
+      "  -boot-load-size 4 \\",
+      "  -boot-info-table \\",
+      "  -o \"$OUTPUT_DIR/ubuntu-live.iso\" \\",
+      "  \"$ISO_DIR\"",
       "",
-      "echo 'Live ISO created at $LIVE_ISO_DIR/$ISO_NAME'",
+      "echo 'Live ISO created at $OUTPUT_DIR/ubuntu-live.iso'",
       "EOT",
       
-      # Make the script executable
-      "sudo chmod +x /home/ubuntu/create-live-iso.sh",
+      # Make script executable and run
+      "chmod +x /home/ubuntu/create-live-iso.sh",
+      "sudo /home/ubuntu/create-live-iso.sh",
       
+      # Cleanup
       "echo 'ubuntu' | sudo -S apt-get clean",
-      "echo 'ubuntu' | sudo -S apt-get autoremove -y",
-      
-      # Clear logs and temporary files
-      "sudo rm -f /var/log/audit/audit.log",
-      "sudo truncate -s 0 /var/log/wtmp",
-      "sudo truncate -s 0 /var/log/lastlog",
-      
-      # Remove SSH host keys (they will be regenerated on first boot)
-      "sudo rm -f /etc/ssh/ssh_host_*",
-      
-      # Clear machine ID
-      "sudo truncate -s 0 /etc/machine-id",
-      "sudo rm -f /var/lib/dbus/machine-id",
-      
-      # Clear shell history
-      "sudo rm -f /root/.bash_history",
-      "rm -f ~/.bash_history",
-      
-      # Clean temporary files
-      "sudo rm -rf /tmp/*",
-      "sudo rm -rf /var/tmp/*"
+      "echo 'ubuntu' | sudo -S apt-get autoremove -y"
     ]
   }
 }
