@@ -136,6 +136,7 @@ source "virtualbox-iso" "ubuntu" {
     ["modifyvm", "{{.Name}}", "--boot1", "dvd"],
     ["modifyvm", "{{.Name}}", "--boot2", "disk"],
     ["modifyvm", "{{.Name}}", "--nat-localhostreachable1", "on"],
+    ["sharedfolder", "add", "{{.Name}}", "--name", "shared", "--hostpath", "${var.shared_folder_host_path}"],
     ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"]
   ]
   
