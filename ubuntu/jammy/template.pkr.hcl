@@ -39,7 +39,7 @@ variable "output_directory" {
 
 variable "shared_folder_host_path" {
   type    = string
-  default = "./shared"
+  default = "shared"
 }
 
 locals {
@@ -78,8 +78,6 @@ autoinstall:
     - wget
     - vim
     - net-tools
-    - docker.io
-    - docker-compose
     - openssh-server
     # Tools needed for live ISO creation
     - squashfs-tools
@@ -96,13 +94,8 @@ autoinstall:
     - chmod 440 /target/etc/sudoers.d/ubuntu
     - "sed -i 's/^#*\\(PermitRootLogin\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
     - "sed -i 's/^#*\\(PasswordAuthentication\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
-    # Enable Docker service
-    - "systemctl enable docker.service"
-    - "systemctl enable containerd.service"
     # Enable SSH server
     - "systemctl enable ssh.service"
-    # Add ubuntu user to docker group
-    - "usermod -aG docker ubuntu"
 EOF
 }
 
@@ -143,8 +136,7 @@ source "virtualbox-iso" "ubuntu" {
     ["modifyvm", "{{.Name}}", "--boot1", "dvd"],
     ["modifyvm", "{{.Name}}", "--boot2", "disk"],
     ["modifyvm", "{{.Name}}", "--nat-localhostreachable1", "on"],
-    ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"],
-    ["sharedfolder", "add", "{{.Name}}", "--name=shared", "--hostpath=${var.shared_folder_host_path}", "--automount"]
+    ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"]
   ]
   
   http_content = {
@@ -160,12 +152,6 @@ build {
     inline = [
       "echo 'ubuntu' | sudo -S apt-get update",
       "echo 'ubuntu' | sudo -S apt-get upgrade -y",
-      
-      # Ensure Docker is installed and running
-      "echo 'ubuntu' | sudo -S apt-get install -y docker.io docker-compose",
-      "echo 'ubuntu' | sudo -S systemctl enable docker",
-      "echo 'ubuntu' | sudo -S systemctl start docker",
-      "echo 'ubuntu' | sudo -S usermod -aG docker ubuntu",
       
       # Ensure SSH server is installed and running
       "echo 'ubuntu' | sudo -S apt-get install -y openssh-server",
