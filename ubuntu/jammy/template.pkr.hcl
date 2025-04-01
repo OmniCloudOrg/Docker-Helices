@@ -9,7 +9,7 @@ packer {
 
 variable "vm_name" {
   type    = string
-  default = "ubuntu-jammy"
+  default = "ubuntu-base-live-iso"
 }
 
 variable "cpus" {
@@ -37,11 +37,16 @@ variable "output_directory" {
   default = "output-virtualbox"
 }
 
+variable "shared_folder_host_path" {
+  type    = string
+  default = "./shared"
+}
+
 locals {
   iso_url      = "https://releases.ubuntu.com/jammy/ubuntu-22.04.5-live-server-amd64.iso"
   iso_checksum = "sha256:9bc6028870aef3f74f4e16b900008179e78b130e6b0b9a140635434a46aa98b0"
   
-  # Base autoinstall configuration 
+  # Base autoinstall configuration embedded as heredoc
   user_data = <<EOF
 #cloud-config
 autoinstall:
@@ -73,6 +78,8 @@ autoinstall:
     - wget
     - vim
     - net-tools
+    - docker.io
+    - docker-compose
     - openssh-server
     # Tools needed for live ISO creation
     - squashfs-tools
@@ -87,10 +94,15 @@ autoinstall:
   late-commands:
     - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
     - chmod 440 /target/etc/sudoers.d/ubuntu
-    - "sed -i 's/^#*\(PermitRootLogin\).*/\1 yes/' /target/etc/ssh/sshd_config"
-    - "sed -i 's/^#*\(PasswordAuthentication\).*/\1 yes/' /target/etc/ssh/sshd_config"
+    - "sed -i 's/^#*\\(PermitRootLogin\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
+    - "sed -i 's/^#*\\(PasswordAuthentication\\).*/\\1 yes/' /target/etc/ssh/sshd_config"
+    # Enable Docker service
+    - "systemctl enable docker.service"
+    - "systemctl enable containerd.service"
     # Enable SSH server
     - "systemctl enable ssh.service"
+    # Add ubuntu user to docker group
+    - "usermod -aG docker ubuntu"
 EOF
 }
 
@@ -131,7 +143,8 @@ source "virtualbox-iso" "ubuntu" {
     ["modifyvm", "{{.Name}}", "--boot1", "dvd"],
     ["modifyvm", "{{.Name}}", "--boot2", "disk"],
     ["modifyvm", "{{.Name}}", "--nat-localhostreachable1", "on"],
-    ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"]
+    ["modifyvm", "{{.Name}}", "--natpf1", "guestssh,tcp,,2222,,22"],
+    ["sharedfolder", "add", "{{.Name}}", "--name=shared", "--hostpath=${var.shared_folder_host_path}", "--automount"]
   ]
   
   http_content = {
@@ -148,6 +161,12 @@ build {
       "echo 'ubuntu' | sudo -S apt-get update",
       "echo 'ubuntu' | sudo -S apt-get upgrade -y",
       
+      # Ensure Docker is installed and running
+      "echo 'ubuntu' | sudo -S apt-get install -y docker.io docker-compose",
+      "echo 'ubuntu' | sudo -S systemctl enable docker",
+      "echo 'ubuntu' | sudo -S systemctl start docker",
+      "echo 'ubuntu' | sudo -S usermod -aG docker ubuntu",
+      
       # Ensure SSH server is installed and running
       "echo 'ubuntu' | sudo -S apt-get install -y openssh-server",
       "echo 'ubuntu' | sudo -S systemctl enable ssh",
@@ -156,13 +175,49 @@ build {
       # Install tools for live ISO creation
       "echo 'ubuntu' | sudo -S apt-get install -y squashfs-tools xorriso isolinux syslinux-common debootstrap genisoimage p7zip-full",
       
-      # Create shared directory manually
+      # Mount the shared folder for ISO creation
       "sudo mkdir -p /mnt/shared",
+      "sudo mount -t vboxsf shared /mnt/shared",
       
-      # Optional: Add a placeholder file to verify shared folder access
-      "echo 'Shared folder access test' | sudo tee /mnt/shared/test.txt",
+      # Create a basic script for live ISO creation
+      "cat << 'EOT' | sudo tee /home/ubuntu/create-live-iso.sh",
+      "#!/bin/bash",
+      "set -e",
+      "",
+      "# Destination for the live ISO",
+      "LIVE_ISO_DIR='/mnt/shared/ubuntu-live-iso'",
+      "ISO_NAME='ubuntu-custom-live.iso'",
+      "",
+      "# Create working directories",
+      "mkdir -p $LIVE_ISO_DIR/extract",
+      "mkdir -p $LIVE_ISO_DIR/custom",
+      "mkdir -p $LIVE_ISO_DIR/new-iso",
+      "",
+      "# Mount the original ISO",
+      "sudo mount -o loop /path/to/original/ubuntu-22.04.5-live-server-amd64.iso $LIVE_ISO_DIR/extract",
+      "",
+      "# Copy ISO contents",
+      "rsync -av $LIVE_ISO_DIR/extract/ $LIVE_ISO_DIR/custom/",
+      "",
+      "# Optional: Customize the live ISO here",
+      "# For example, add custom packages, scripts, etc.",
+      "",
+      "# Rebuild the ISO",
+      "cd $LIVE_ISO_DIR/custom",
+      "xorriso -as mkisofs -r -o $LIVE_ISO_DIR/$ISO_NAME -b isolinux/isolinux.bin -c isolinux/boot.cat \\",
+      "  -no-emul-boot -boot-load-size 4 -boot-info-table \\",
+      "  -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \\",
+      "  -eltorito-boot isolinux/isolinux.bin \\",
+      "  -eltorito-catalog isolinux/boot.cat \\",
+      "  -no-emul-boot -boot-load-size 4 -boot-info-table \\",
+      "  -joliet -z -l .",
+      "",
+      "echo 'Live ISO created at $LIVE_ISO_DIR/$ISO_NAME'",
+      "EOT",
       
-      # Clean up
+      # Make the script executable
+      "sudo chmod +x /home/ubuntu/create-live-iso.sh",
+      
       "echo 'ubuntu' | sudo -S apt-get clean",
       "echo 'ubuntu' | sudo -S apt-get autoremove -y",
       
