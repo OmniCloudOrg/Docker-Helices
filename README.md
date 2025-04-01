@@ -3,4 +3,6 @@
 ## Building an OmniCloud Helix ISO
 This has been tested on linux and windows and should support MacOS
 
-```make```
+```sh
+make
+```
